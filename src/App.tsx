@@ -5,7 +5,10 @@ import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { PokerTable, type Player } from '@/components/PokerTable'
 import { HandInputForm, type HandData } from '@/components/HandInputForm'
+import { EnhancedActionControls } from '@/components/EnhancedActionControls'
+import { PokerEngine } from '@/utils/pokerEngine'
 import { Play, Pause, SkipForward, SkipBack, Plus, Library, BarChart3 } from 'lucide-react'
+import type { PlayerState, GameState } from '@/types/poker'
 
 function App() {
   const [currentView, setCurrentView] = useState<'table' | 'input' | 'library'>('table')
@@ -13,6 +16,9 @@ function App() {
   const [currentHand, setCurrentHand] = useState<HandData | null>(null)
   const [isReplaying, setIsReplaying] = useState(false)
   const [replayStep, setReplayStep] = useState(0)
+  const [gameState, setGameState] = useState<GameState | null>(null)
+  const [players, setPlayers] = useState<PlayerState[]>([])
+  const [pokerEngine, setPokerEngine] = useState<PokerEngine | null>(null)
 
   // Sample data for demonstration
   const samplePlayers: Player[] = [
@@ -64,12 +70,32 @@ function App() {
   const handleSaveHand = (hand: HandData) => {
     setHands([...hands, hand])
     setCurrentHand(hand)
+    setGameState(hand.gameState)
+    setPlayers(hand.players)
+    setPokerEngine(new PokerEngine(hand.gameState, hand.players))
     setCurrentView('table')
   }
 
   const handlePlayerAction = (playerId: string, action: string, amount?: number) => {
-    console.log(`Player ${playerId} ${action}${amount ? ` $${amount}` : ''}`)
-    // Here you would update the game state
+    if (!pokerEngine || !gameState) return
+
+    const actionResult = pokerEngine.executeAction(playerId, action, amount)
+    if (actionResult) {
+      // Update state with new game state and players
+      const newGameState = pokerEngine.getGameState()
+      const newPlayers = pokerEngine.getPlayers()
+      
+      setGameState(newGameState)
+      setPlayers(newPlayers)
+      
+      // Move to next player if betting round isn't complete
+      if (!pokerEngine.isHandComplete()) {
+        pokerEngine.moveActionToNextPlayer()
+        setGameState(pokerEngine.getGameState())
+      }
+      
+      console.log(`${playerId} ${action}${amount ? ` ${amount}` : ''}`, actionResult)
+    }
   }
 
   const startReplay = () => {
@@ -238,17 +264,55 @@ function App() {
             </Card>
 
             {/* Poker Table */}
-            <PokerTable
-              players={samplePlayers}
-              communityCards={sampleCommunityCards}
-              pot={15}
-              currentBet={2}
-              activePlayer={isReplaying ? undefined : 'villain2'}
-              dealerPosition={6}
-              onPlayerAction={handlePlayerAction}
-              isReplaying={isReplaying}
-              replayStep={replayStep}
-            />
+            {gameState && players.length > 0 ? (
+              <div className="space-y-4">
+                <PokerTable
+                  players={players.map(p => ({
+                    id: p.id,
+                    name: p.name,
+                    position: p.position,
+                    stack: p.currentStack,
+                    cards: p.cards,
+                    isActive: p.position === gameState.actionPosition && !isReplaying,
+                    hasActed: p.hasActed,
+                    currentBet: p.currentBet,
+                    action: p.lastAction?.type
+                  }))}
+                  communityCards={gameState.communityCards}
+                  pot={gameState.pot}
+                  currentBet={gameState.currentBet}
+                  activePlayer={isReplaying ? undefined : players.find(p => p.position === gameState.actionPosition)?.id}
+                  dealerPosition={gameState.dealerPosition}
+                  onPlayerAction={handlePlayerAction}
+                  isReplaying={isReplaying}
+                  replayStep={replayStep}
+                />
+                
+                {/* Enhanced Action Controls */}
+                {!isReplaying && gameState && players.length > 0 && (
+                  <div className="flex justify-center">
+                    <EnhancedActionControls
+                      gameState={gameState}
+                      players={players}
+                      activePlayerId={players.find(p => p.position === gameState.actionPosition)?.id || ''}
+                      onAction={handlePlayerAction}
+                    />
+                  </div>
+                )}
+              </div>
+            ) : (
+              <PokerTable
+                players={samplePlayers}
+                communityCards={sampleCommunityCards}
+                pot={15}
+                currentBet={2}
+                activePlayer={isReplaying ? undefined : 'villain2'}
+                dealerPosition={6}
+                onPlayerAction={handlePlayerAction}
+                isReplaying={isReplaying}
+                replayStep={replayStep}
+              />
+            )}
 
             {/* Hand Analysis Panel */}
             <Tabs defaultValue="actions" className="w-full">
@@ -261,19 +325,34 @@ function App() {
               <TabsContent value="actions" className="space-y-4">
                 <Card className="p-4">
                   <h3 className="font-semibold mb-3 text-white">Action Timeline</h3>
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-sm">
-                      <span className="text-gray-400">Preflop:</span>
-                      <span className="text-white">SB posts $1, BB posts $2</span>
-                    </div>
-                    <div className="flex justify-between text-sm">
-                      <span className="text-gray-400">UTG:</span>
-                      <span className="text-white">RockSolid folds</span>
-                    </div>
-                    <div className="flex justify-between text-sm">
-                      <span className="text-gray-400">BTN:</span>
-                      <span className="text-accent font-medium">Hero raises to $6</span>
-                    </div>
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {gameState?.actions.length ? (
+                      gameState.actions.map((action, index) => {
+                        const player = players.find(p => p.id === action.playerId)
+                        const actionText = action.type === 'fold' ? 'folds' :
+                                         action.type === 'check' ? 'checks' :
+                                         action.type === 'call' ? `calls ${action.amount}` :
+                                         action.type === 'bet' ? `bets ${action.amount}` :
+                                         action.type === 'raise' ? `raises to ${action.amount + (player?.currentBet || 0)}` :
+                                         action.type === 'all-in' ? `goes all-in for ${action.amount}` :
+                                         action.type
+                        
+                        return (
+                          <div key={action.id} className="flex justify-between text-sm">
+                            <span className="text-gray-400">
+                              {action.street.charAt(0).toUpperCase() + action.street.slice(1)}:
+                            </span>
+                            <span className={`${action.playerId.includes('hero') ? 'text-accent font-medium' : 'text-white'}`}>
+                              {player?.name} {actionText}
+                            </span>
+                          </div>
+                        )
+                      })
+                    ) : (
+                      <div className="text-gray-400 text-sm text-center py-4">
+                        No actions yet. Create a hand to start tracking actions.
+                      </div>
+                    )}
                   </div>
                 </Card>
               </TabsContent>
@@ -304,19 +383,47 @@ function App() {
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <div className="text-gray-400 text-sm">Pot Size</div>
-                      <div className="text-white font-bold">$15</div>
+                      <div className="text-white font-bold">${gameState?.pot.toLocaleString() || '0'}</div>
                     </div>
                     <div>
-                      <div className="text-gray-400 text-sm">Effective Stack</div>
-                      <div className="text-white font-bold">150 BB</div>
+                      <div className="text-gray-400 text-sm">Current Bet</div>
+                      <div className="text-white font-bold">${gameState?.currentBet.toLocaleString() || '0'}</div>
                     </div>
                     <div>
-                      <div className="text-gray-400 text-sm">Your Equity</div>
-                      <div className="text-green-400 font-bold">68%</div>
+                      <div className="text-gray-400 text-sm">Active Players</div>
+                      <div className="text-green-400 font-bold">
+                        {players.filter(p => !p.isFolded).length}
+                      </div>
                     </div>
                     <div>
-                      <div className="text-gray-400 text-sm">Pot Odds</div>
-                      <div className="text-white font-bold">3:1</div>
+                      <div className="text-gray-400 text-sm">All-In Players</div>
+                      <div className="text-white font-bold">
+                        {players.filter(p => p.isAllIn).length}
+                      </div>
+                    </div>
+                    {gameState?.sidePots.length > 0 && (
+                      <>
+                        <div>
+                          <div className="text-gray-400 text-sm">Side Pots</div>
+                          <div className="text-yellow-400 font-bold">{gameState.sidePots.length}</div>
+                        </div>
+                        <div>
+                          <div className="text-gray-400 text-sm">Total Side Pot</div>
+                          <div className="text-yellow-400 font-bold">
+                            ${gameState.sidePots.reduce((sum, pot) => sum + pot.amount, 0).toLocaleString()}
+                          </div>
+                        </div>
+                      </>
+                    )}
+                    <div>
+                      <div className="text-gray-400 text-sm">Street</div>
+                      <div className="text-white font-bold">
+                        {gameState?.street.charAt(0).toUpperCase() + (gameState?.street.slice(1) || '')}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-gray-400 text-sm">Actions Taken</div>
+                      <div className="text-white font-bold">{gameState?.actions.length || 0}</div>
                     </div>
                   </div>
                 </Card>
